@@ -1,8 +1,10 @@
-import { Logger, OnModuleInit } from '@nestjs/common';
+import { Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { nextTick } from 'process';
 import { Client, Consumer, ConsumerConfig, Message } from 'pulsar-client';
 
-export abstract class PulsarConsumer<T> implements OnModuleInit {
+export abstract class PulsarConsumer<T>
+  implements OnModuleInit, OnModuleDestroy
+{
   private consumer: Consumer;
   protected readonly logger = new Logger(this.config.topic);
   protected running = true;
@@ -16,6 +18,12 @@ export abstract class PulsarConsumer<T> implements OnModuleInit {
     await this.connect();
   }
 
+  async onModuleDestroy() {
+    this.running = false;
+
+    await this.consumer.close();
+  }
+
   protected async connect() {
     this.consumer = await this.pulsarClient.subscribe(this.config);
 
@@ -25,25 +33,32 @@ export abstract class PulsarConsumer<T> implements OnModuleInit {
 
   private async consume() {
     while (this.running) {
-      let message: Message;
-
       try {
-        message = await this.consumer.receive();
-        const data = JSON.parse(message.getData().toString());
+        const messages = await this.consumer.batchReceive();
 
-        console.log(data, message.getMessageId().toString());
-        this.handleMessage(data);
+        await Promise.allSettled(
+          messages.map((message) => this.receive(message)),
+        );
       } catch (error) {
-        this.logger.error('Error consuming.', error);
+        this.logger.error('Error receiving batch.', error);
       }
+    }
+  }
 
-      try {
-        if (message) {
-          await this.consumer.acknowledge(message);
-        }
-      } catch (error) {
-        this.logger.error('Error acknowledge.', error);
-      }
+  private async receive(message: Message) {
+    try {
+      const data = JSON.parse(message.getData().toString());
+
+      console.log(data, message.getMessageId().toString());
+      this.handleMessage(data);
+    } catch (error) {
+      this.logger.error('Error consuming.', error);
+    }
+
+    try {
+      await this.consumer.acknowledge(message);
+    } catch (error) {
+      this.logger.error('Error acknowledge.', error);
     }
   }
 
